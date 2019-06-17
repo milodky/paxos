@@ -54,7 +54,15 @@ func (s *Server) Start() {
 
   // Random sleep.
   time.Sleep(time.Duration(rand.Float32() *1000 * timeout) * time.Millisecond)
-  s.startAndWait()
+  go s.startAndWait()
+
+  s.ping()
+}
+
+func (s *Server) ping() {
+  for ;; {
+    time.Sleep(timeout * time.Second)
+  }
 }
 
 
