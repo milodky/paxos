@@ -6,6 +6,8 @@ import (
   "sync"
   "math/rand"
   "net/http"
+  "bytes"
+  "encoding/json"
 )
 const (
   timeout = 10
@@ -28,7 +30,9 @@ type Server struct {
   master string
   ns     []string
   http   *http.Client
+  pch    chan bool
 
+  duration    time.Duration
   promisedSeq int64
 }
 
@@ -37,7 +41,9 @@ func NewServer(n string, ns []string) *Server {
     lock: &sync.Mutex{},
     self: n,
     ns:   ns,
-    http: &http.Client{Timeout: time.Second * timeout},
+    // If no heartbeat for more than 100 seconds, re-elect the master.
+    duration: timeout * 10 * time.Second,
+    http:     &http.Client{Timeout: time.Second * timeout},
   }
 }
 
@@ -56,13 +62,44 @@ func (s *Server) Start() {
   time.Sleep(time.Duration(rand.Float32() *1000 * timeout) * time.Millisecond)
   go s.startAndWait()
 
-  s.ping()
+  s.monitor()
 }
 
-func (s *Server) ping() {
+func (s *Server) monitor() {
+  t := time.NewTimer(s.duration)
+  defer t.Stop()
   for ;; {
-    time.Sleep(timeout * time.Second)
+    if s.isMaster() {
+      count := 0
+      for _, n := range s.ns {
+        // Ping each slave. If majority of them still respond, the master is
+	// maintained. Otherwise clear the master and re-elect.
+        resp, err := s.http.Get(fmt.Sprintf("http://%s/ping", n))
+        if err != nil || resp.StatusCode != 200{
+          log.Printf("failed to ping %s", n)
+          continue
+        }
+	count++
+      }
+      if count < len(s.ns) / 2 {
+        s.updateMasterAndSequence("", 0)
+	continue
+      }
+      time.Sleep(timeout * time.Second)
+      t.Reset(s.duration)
+      continue
+    }
+    select {
+    case <-t.C:
+      s.updateMasterAndSequence("", 0)
+    case <-s.pch:
+      t.Reset(s.duration)
+    }
   }
+}
+
+func (s *Server) ping(w http.ResponseWriter, _ *http.Request) {
+  w.WriteHeader(http.StatusOK)
 }
 
 
@@ -137,5 +174,24 @@ func (s *Server) updateMasterAndSequence(m string, seq int64) {
   s.promisedSeq = 0
   s.seq = seq
   s.master = m
+}
+
+func (s *Server) send(data []byte, url string) (interface{}, error) {
+  response, err := s.http.Post(url, "application/json", bytes.NewBuffer(data))
+  if err != nil {
+    log.Printf("failed to send request to %s due to %v", url, err)
+    return nil, err
+  }
+  if response.StatusCode != 200 {
+    log.Printf("non 200 HTTP status returned by %s, code: %d", url, response.StatusCode)
+    return nil, err
+  }
+
+  var body interface{}
+  decoder := json.NewDecoder(response.Body)
+  if err = decoder.Decode(&body); err != nil {
+    log.Printf("failed to parse response %s due to %v", response, err)
+  }
+  return body, err
 }
 
