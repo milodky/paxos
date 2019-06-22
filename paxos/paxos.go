@@ -30,8 +30,8 @@ type Server struct {
   master string
   ns     []string
   http   *http.Client
-  pch    chan bool
 
+  pingCH      chan bool
   duration    time.Duration
   promisedSeq int64
 }
@@ -68,31 +68,32 @@ func (s *Server) Start() {
 func (s *Server) monitor() {
   t := time.NewTimer(s.duration)
   defer t.Stop()
+  defer close(s.pingCH)
   for ;; {
     if s.isMaster() {
       count := 0
       for _, n := range s.ns {
         // Ping each slave. If majority of them still respond, the master is
-	// maintained. Otherwise clear the master and re-elect.
+        // maintained. Otherwise clear the master and re-elect.
         resp, err := s.http.Get(fmt.Sprintf("http://%s/ping", n))
         if err != nil || resp.StatusCode != 200{
           log.Printf("failed to ping %s", n)
           continue
         }
-	count++
+        count++
       }
       if count < len(s.ns) / 2 {
         s.updateMasterAndSequence("", 0)
-	continue
+      } else {
+        time.Sleep(timeout * time.Second)
+        t.Reset(s.duration)
       }
-      time.Sleep(timeout * time.Second)
-      t.Reset(s.duration)
       continue
     }
     select {
     case <-t.C:
       s.updateMasterAndSequence("", 0)
-    case <-s.pch:
+    case <-s.pingCH:
       t.Reset(s.duration)
     }
   }
@@ -100,6 +101,7 @@ func (s *Server) monitor() {
 
 func (s *Server) ping(w http.ResponseWriter, _ *http.Request) {
   w.WriteHeader(http.StatusOK)
+  s.pingCH <- true
 }
 
 
