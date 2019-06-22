@@ -31,7 +31,8 @@ type Server struct {
   ns     []string
   http   *http.Client
 
-  pingCH      chan bool
+  pChan       chan bool
+  mChan       chan bool
   duration    time.Duration
   promisedSeq int64
 }
@@ -44,6 +45,8 @@ func NewServer(n string, ns []string) *Server {
     // If no heartbeat for more than 100 seconds, re-elect the master.
     duration: timeout * 10 * time.Second,
     http:     &http.Client{Timeout: time.Second * timeout},
+    pChan:    make(chan bool),
+    mChan:    make(chan bool),
   }
 }
 
@@ -51,6 +54,7 @@ func (s *Server) Start() {
   http.HandleFunc("/admin", s.admin)
   http.HandleFunc("/promise", s.promise)
   http.HandleFunc("/accept", s.accept)
+  http.HandleFunc("/ping", s.ping)
   go func() {
     // Figure out how to tell the main thread.
     if err := http.ListenAndServe(s.self, nil); err != nil {
@@ -62,13 +66,16 @@ func (s *Server) Start() {
   time.Sleep(time.Duration(rand.Float32() *1000 * timeout) * time.Millisecond)
   go s.startAndWait()
 
+  log.Printf("%s starts to monitor", s.self)
   s.monitor()
+  defer close(s.pChan)
+  defer close(s.mChan)
 }
 
 func (s *Server) monitor() {
   t := time.NewTimer(s.duration)
   defer t.Stop()
-  defer close(s.pingCH)
+  defer close(s.pChan)
   for ;; {
     if s.isMaster() {
       count := 0
@@ -76,10 +83,11 @@ func (s *Server) monitor() {
         // Ping each slave. If majority of them still respond, the master is
         // maintained. Otherwise clear the master and re-elect.
         resp, err := s.http.Get(fmt.Sprintf("http://%s/ping", n))
-        if err != nil || resp.StatusCode != 200{
-          log.Printf("failed to ping %s", n)
+        if err != nil || resp.StatusCode != 200 {
+          log.Printf("failed to ping %s\n", n)
           continue
         }
+        log.Printf("ping %s successfully\n", n)
         count++
       }
       if count < len(s.ns) / 2 {
@@ -93,7 +101,9 @@ func (s *Server) monitor() {
     select {
     case <-t.C:
       s.updateMasterAndSequence("", 0)
-    case <-s.pingCH:
+    case <-s.pChan:
+      t.Reset(s.duration)
+    case <-s.mChan:
       t.Reset(s.duration)
     }
   }
@@ -101,7 +111,7 @@ func (s *Server) monitor() {
 
 func (s *Server) ping(w http.ResponseWriter, _ *http.Request) {
   w.WriteHeader(http.StatusOK)
-  s.pingCH <- true
+  s.pChan <- true
 }
 
 
@@ -148,6 +158,7 @@ func (s *Server) startAndWait() {
       continue
     }
     s.updateMasterAndSequence(electedNode.Master, electedNode.Sequence)
+    s.mChan <- true
   }
 
 }
