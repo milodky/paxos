@@ -66,7 +66,7 @@ func (s *Server) Start() {
   time.Sleep(time.Duration(rand.Float32() *1000 * timeout) * time.Millisecond)
   go s.startAndWait()
 
-  log.Printf("%s starts to monitor", s.self)
+  log.Printf("%s starts to monitor\n", s.self)
   s.monitor()
   defer close(s.pChan)
   defer close(s.mChan)
@@ -75,7 +75,6 @@ func (s *Server) Start() {
 func (s *Server) monitor() {
   t := time.NewTimer(s.duration)
   defer t.Stop()
-  defer close(s.pChan)
   for ;; {
     if s.isMaster() {
       count := 0
@@ -85,10 +84,10 @@ func (s *Server) monitor() {
         resp, err := s.http.Get(fmt.Sprintf("http://%s/ping", n))
         if err != nil || resp.StatusCode != 200 {
           log.Printf("failed to ping %s\n", n)
-          continue
+        } else {
+          log.Printf("ping %s successfully\n", n)
+          count++
         }
-        log.Printf("ping %s successfully\n", n)
-        count++
       }
       if count < len(s.ns) / 2 {
         s.updateMasterAndSequence("", 0)
